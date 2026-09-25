@@ -47,8 +47,17 @@ function getInitialSnake(): Position[] {
 }
 
 export function useSnakeGame() {
-  const [snake, setSnake] = useState<Position[]>(getInitialSnake());
-  const [food, setFood] = useState<Position>(() => getRandomPosition(getInitialSnake()));
+  // Use refs for game-loop mutable state to avoid nested setState issues
+  const snakeRef = useRef<Position[]>(getInitialSnake());
+  const foodRef = useRef<Position>(getRandomPosition(getInitialSnake()));
+  const directionRef = useRef<Direction>('RIGHT');
+  const nextDirectionRef = useRef<Direction>('RIGHT');
+  const scoreRef = useRef(0);
+  const gameStateRef = useRef<GameState>('idle');
+
+  // React state mirrors for rendering
+  const [snake, setSnake] = useState<Position[]>(snakeRef.current);
+  const [food, setFood] = useState<Position>(foodRef.current);
   const [direction, setDirection] = useState<Direction>('RIGHT');
   const [gameState, setGameState] = useState<GameState>('idle');
   const [score, setScore] = useState(0);
@@ -57,28 +66,26 @@ export function useSnakeGame() {
     try {
       const stored = localStorage.getItem('snake-highscores');
       if (stored) return JSON.parse(stored);
-    } catch {}
+    } catch {
+      // ignore
+    }
     return { easy: 0, medium: 0, hard: 0 };
   });
 
-  const directionRef = useRef<Direction>(direction);
-  const nextDirectionRef = useRef<Direction>(direction);
-  const gameStateRef = useRef<GameState>(gameState);
   const gameLoopRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    directionRef.current = direction;
-  }, [direction]);
-
+  // Keep refs in sync with state
   useEffect(() => {
     gameStateRef.current = gameState;
   }, [gameState]);
 
-  // Save high scores
+  // Save high scores to localStorage
   useEffect(() => {
     try {
       localStorage.setItem('snake-highscores', JSON.stringify(highScores));
-    } catch {}
+    } catch {
+      // ignore
+    }
   }, [highScores]);
 
   const changeDirection = useCallback((newDir: Direction) => {
@@ -90,43 +97,54 @@ export function useSnakeGame() {
   const gameStep = useCallback(() => {
     if (gameStateRef.current !== 'playing') return;
 
-    setDirection(nextDirectionRef.current);
+    // Apply queued direction
     directionRef.current = nextDirectionRef.current;
+    setDirection(directionRef.current);
 
-    setSnake((prevSnake) => {
-      const dir = DIRECTION_MAP[directionRef.current];
-      const head = prevSnake[0];
-      const newHead: Position = {
-        x: head.x + dir.x,
-        y: head.y + dir.y,
-      };
+    const dir = DIRECTION_MAP[directionRef.current];
+    const prevSnake = snakeRef.current;
+    const head = prevSnake[0];
+    const newHead: Position = {
+      x: head.x + dir.x,
+      y: head.y + dir.y,
+    };
 
-      // Wall collision
-      if (newHead.x < 0 || newHead.x >= GRID_SIZE || newHead.y < 0 || newHead.y >= GRID_SIZE) {
-        setGameState('gameover');
-        return prevSnake;
-      }
+    // Wall collision
+    if (
+      newHead.x < 0 ||
+      newHead.x >= GRID_SIZE ||
+      newHead.y < 0 ||
+      newHead.y >= GRID_SIZE
+    ) {
+      gameStateRef.current = 'gameover';
+      setGameState('gameover');
+      return;
+    }
 
-      // Self collision
-      if (prevSnake.some((s) => s.x === newHead.x && s.y === newHead.y)) {
-        setGameState('gameover');
-        return prevSnake;
-      }
+    // Self collision
+    if (prevSnake.some((s) => s.x === newHead.x && s.y === newHead.y)) {
+      gameStateRef.current = 'gameover';
+      setGameState('gameover');
+      return;
+    }
 
-      const newSnake = [newHead, ...prevSnake];
+    // Build new snake
+    const newSnake = [newHead, ...prevSnake];
+    const currentFood = foodRef.current;
 
-      // Check food
-      setFood((prevFood) => {
-        if (newHead.x === prevFood.x && newHead.y === prevFood.y) {
-          setScore((s) => s + 1);
-          return getRandomPosition(newSnake);
-        }
-        newSnake.pop();
-        return prevFood;
-      });
+    if (newHead.x === currentFood.x && newHead.y === currentFood.y) {
+      // Ate food — grow
+      scoreRef.current += 1;
+      setScore(scoreRef.current);
+      const newFood = getRandomPosition(newSnake);
+      foodRef.current = newFood;
+      setFood(newFood);
+    } else {
+      newSnake.pop();
+    }
 
-      return newSnake;
-    });
+    snakeRef.current = newSnake;
+    setSnake(newSnake);
   }, []);
 
   // Game loop
@@ -136,7 +154,7 @@ export function useSnakeGame() {
       gameLoopRef.current = window.setInterval(gameStep, speed);
     }
     return () => {
-      if (gameLoopRef.current) {
+      if (gameLoopRef.current !== null) {
         clearInterval(gameLoopRef.current);
         gameLoopRef.current = null;
       }
@@ -147,29 +165,42 @@ export function useSnakeGame() {
   useEffect(() => {
     if (gameState === 'gameover') {
       setHighScores((prev) => {
-        if (score > prev[difficulty]) {
-          return { ...prev, [difficulty]: score };
+        if (scoreRef.current > prev[difficulty]) {
+          return { ...prev, [difficulty]: scoreRef.current };
         }
         return prev;
       });
     }
-  }, [gameState, score, difficulty]);
+  }, [gameState, difficulty]);
 
   const startGame = useCallback(() => {
     const initialSnake = getInitialSnake();
-    setSnake(initialSnake);
-    setFood(getRandomPosition(initialSnake));
-    setDirection('RIGHT');
+    const initialFood = getRandomPosition(initialSnake);
+
+    snakeRef.current = initialSnake;
+    foodRef.current = initialFood;
     directionRef.current = 'RIGHT';
     nextDirectionRef.current = 'RIGHT';
+    scoreRef.current = 0;
+    gameStateRef.current = 'playing';
+
+    setSnake(initialSnake);
+    setFood(initialFood);
+    setDirection('RIGHT');
     setScore(0);
     setGameState('playing');
   }, []);
 
   const togglePause = useCallback(() => {
     setGameState((prev) => {
-      if (prev === 'playing') return 'paused';
-      if (prev === 'paused') return 'playing';
+      if (prev === 'playing') {
+        gameStateRef.current = 'paused';
+        return 'paused';
+      }
+      if (prev === 'paused') {
+        gameStateRef.current = 'playing';
+        return 'playing';
+      }
       return prev;
     });
   }, []);
